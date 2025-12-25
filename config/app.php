@@ -2,6 +2,8 @@
 
 return [
 
+    App\Providers\LivewireComponentsServiceProvider::class,
+
     /*
     |--------------------------------------------------------------------------
     | Application Name

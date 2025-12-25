@@ -2,6 +2,7 @@
 
 namespace App\Filament\Widgets;
 
+use App\Filament\Resources\Agendas\AgendaResource;
 use App\Models\Bloqueio;
 use App\Models\Evento;
 use App\Models\User;
@@ -16,6 +17,7 @@ use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Schema;
+use Filament\Support\RawJs;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Validation\ValidationException;
@@ -61,7 +63,6 @@ class CalendarWidget extends FullCalendarWidget
             return;
         }
 
-        // auto seleciona o primeiro EPC (por nome)
         $firstEpcId = (int) User::query()
             ->role('epc')
             ->orderBy('name')
@@ -84,7 +85,6 @@ class CalendarWidget extends FullCalendarWidget
         }
 
         $isEpc = User::query()->role('epc')->whereKey($userId)->exists();
-
         if (! $isEpc) {
             return;
         }
@@ -92,7 +92,13 @@ class CalendarWidget extends FullCalendarWidget
         $this->agendaUserId = $userId;
         session(['agenda_user_id' => $userId]);
 
+        $this->forceCalendarRefresh();
+    }
+
+    private function forceCalendarRefresh(): void
+    {
         $this->refreshRecords();
+        $this->dispatch('$refresh');
     }
 
     public static function getHeading(): string
@@ -104,13 +110,9 @@ class CalendarWidget extends FullCalendarWidget
     {
         $user = auth()->user();
 
-        if (! $user) {
-            return false;
-        }
+        if (! $user) return false;
 
-        if ($user->hasRole('epc')) {
-            return true;
-        }
+        if ($user->hasRole('epc')) return true;
 
         return User::query()->role('epc')->exists();
     }
@@ -123,6 +125,10 @@ class CalendarWidget extends FullCalendarWidget
             'firstDay' => 1,
             'editable' => true,
             'locale' => 'pt-br',
+
+            // Hora vai no title (ex: 14h Mayso), então não repete hora automática
+            'displayEventTime' => false,
+
             'slotLabelFormat' => [
                 'hour' => '2-digit',
                 'minute' => '2-digit',
@@ -133,6 +139,30 @@ class CalendarWidget extends FullCalendarWidget
                 'minute' => '2-digit',
                 'hour12' => false,
             ],
+
+            // Tooltip no hover: mostra número do procedimento
+            'eventDidMount' => RawJs::make(<<<'JS'
+function(info) {
+    if (info.event.display === 'background') return;
+
+    const proc =
+        info.event?.extendedProps?.procedimento
+        || info.event?._def?.extendedProps?.procedimento;
+
+    if (!proc) return;
+
+    info.el.setAttribute('title', proc);
+
+    const anchor = info.el.querySelector('a');
+    if (anchor) anchor.setAttribute('title', proc);
+
+    const main = info.el.querySelector('.fc-event-main');
+    if (main) main.setAttribute('title', proc);
+
+    const title = info.el.querySelector('.fc-event-title');
+    if (title) title.setAttribute('title', proc);
+}
+JS),
         ];
     }
 
@@ -155,9 +185,7 @@ class CalendarWidget extends FullCalendarWidget
 
     private function getBloqueioDoDia(string $dia): ?Bloqueio
     {
-        if (! $this->agendaUserId) {
-            return null;
-        }
+        if (! $this->agendaUserId) return null;
 
         return Bloqueio::query()
             ->where('user_id', $this->agendaUserId)
@@ -189,13 +217,8 @@ class CalendarWidget extends FullCalendarWidget
 
     private function availableHourOptions(?string $dia, ?int $ignoreEventoId = null): array
     {
-        if (! $dia) {
-            return $this->baseHourOptions();
-        }
-
-        if (! $this->agendaUserId) {
-            return [];
-        }
+        if (! $dia) return $this->baseHourOptions();
+        if (! $this->agendaUserId) return [];
 
         if ($this->isDiaBloqueadoOuFimDeSemana($dia)) {
             return [];
@@ -238,75 +261,61 @@ class CalendarWidget extends FullCalendarWidget
     {
         return [
             Hidden::make('evento_id'),
-
             Hidden::make('dia')->dehydrated(false),
 
-            // ✅ Se for fim de semana: modal só com mensagem
             Placeholder::make('msg_fim_de_semana')
                 ->label('')
                 ->visible(function (Get $get): bool {
                     $dia = $get('dia');
                     if (! $dia) return false;
-
                     return Carbon::parse($dia)->isWeekend();
                 })
                 ->content(function (Get $get): string {
                     $dia = $get('dia');
-
                     $data = $dia ? Carbon::parse($dia)->format('d/m/Y') : '';
-
                     return "❌ {$data} é fim de semana.\nAgendamentos somente em dias úteis (segunda a sexta).";
                 }),
 
-            // ✅ Se for bloqueio do admin: modal só com mensagem + motivo
             Placeholder::make('msg_bloqueio_admin')
                 ->label('')
                 ->visible(function (Get $get): bool {
                     $dia = $get('dia');
                     if (! $dia) return false;
-
-                    // importante: bloqueio do admin apenas (não fim de semana)
                     return $this->isDiaUtil($dia) && $this->isDiaBloqueado($dia);
                 })
                 ->content(function (Get $get): string {
                     $dia = $get('dia');
-
                     $data = $dia ? Carbon::parse($dia)->format('d/m/Y') : '';
                     $bloqueio = $dia ? $this->getBloqueioDoDia($dia) : null;
-
                     $motivo = $bloqueio?->motivo ?: 'Sem motivo informado.';
-
                     return "🚫 Dia bloqueado para este EPC ({$data}).\nMotivo: {$motivo}";
                 }),
 
-            // ✅ A partir daqui, os campos só aparecem se NÃO estiver bloqueado/fds
-            TextInput::make('titulo')
-                ->label('Título')
+            TextInput::make('intimado')
+                ->label('Intimado')
                 ->maxLength(255)
+                ->required(fn (Get $get) => ! ($get('dia') && $this->isDiaBloqueadoOuFimDeSemana($get('dia'))))
+                ->visible(fn (Get $get) => ! ($get('dia') && $this->isDiaBloqueadoOuFimDeSemana($get('dia')))),
+
+            TextInput::make('numero_procedimento')
+                ->label('Número do procedimento')
+                ->maxLength(80)
                 ->required(fn (Get $get) => ! ($get('dia') && $this->isDiaBloqueadoOuFimDeSemana($get('dia'))))
                 ->visible(fn (Get $get) => ! ($get('dia') && $this->isDiaBloqueadoOuFimDeSemana($get('dia')))),
 
             Select::make('hora_inicio')
                 ->label('Horário')
                 ->visible(fn (Get $get) => ! ($get('dia') && $this->isDiaBloqueadoOuFimDeSemana($get('dia'))))
-                ->options(fn (Get $get) => $this->availableHourOptions(
-                    $get('dia'),
-                    $get('evento_id')
-                ))
+                ->options(fn (Get $get) => $this->availableHourOptions($get('dia'), $get('evento_id')))
                 ->disabled(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return false;
-
                     return empty($this->availableHourOptions($dia, $get('evento_id')));
                 })
                 ->required(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return true;
-
-                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) {
-                        return false;
-                    }
-
+                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) return false;
                     return ! empty($this->availableHourOptions($dia, $get('evento_id')));
                 })
                 ->live()
@@ -325,11 +334,7 @@ class CalendarWidget extends FullCalendarWidget
                 ->required(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return true;
-
-                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) {
-                        return false;
-                    }
-
+                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) return false;
                     return ! empty($this->availableHourOptions($dia, $get('evento_id')));
                 }),
 
@@ -337,33 +342,9 @@ class CalendarWidget extends FullCalendarWidget
                 ->required(function (Get $get) {
                     $dia = $get('dia');
                     if (! $dia) return true;
-
-                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) {
-                        return false;
-                    }
-
+                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) return false;
                     return ! empty($this->availableHourOptions($dia, $get('evento_id')));
                 }),
-
-            // ✅ desabilita submit quando não há starts_at (ou seja, bloqueado / sem horários)
-            Placeholder::make('disable_submit_when_no_hours')
-                ->label('')
-                ->content('')
-                ->extraAttributes([
-                    'style' => 'display:none',
-                    'x-data' => '{}',
-                    'x-effect' => <<<'JS'
-                        const root =
-                            $el.closest('.fi-modal') ||
-                            $el.closest('[role="dialog"]') ||
-                            document;
-                        const submit = root.querySelector('button[type="submit"]');
-                        const startsAt = $wire.get('mountedActionsData.0.starts_at');
-                        if (submit) {
-                            submit.disabled = !startsAt;
-                        }
-                    JS,
-                ]),
         ];
     }
 
@@ -374,7 +355,7 @@ class CalendarWidget extends FullCalendarWidget
                 ->label('Selecionar usuário')
                 ->icon('heroicon-o-user')
                 ->visible(fn () => ! auth()->user()?->hasRole('epc') && ! $this->agendaUserId)
-                ->url(fn () => route('filament.admin.pages.dashboard')),
+                ->url(fn () => AgendaResource::getUrl('index')),
 
             Actions\CreateAction::make()
                 ->label('Agendar')
@@ -401,17 +382,16 @@ class CalendarWidget extends FullCalendarWidget
                         return;
                     }
 
-                    // ✅ Se bloqueado/fds: abre modal apenas com mensagem
                     if ($this->isDiaBloqueadoOuFimDeSemana($dia)) {
                         $form->fill([
                             'evento_id' => null,
                             'dia' => $dia,
-                            'titulo' => null,
+                            'intimado' => null,
+                            'numero_procedimento' => null,
                             'hora_inicio' => null,
                             'starts_at' => null,
                             'ends_at' => null,
                         ]);
-
                         return;
                     }
 
@@ -421,12 +401,12 @@ class CalendarWidget extends FullCalendarWidget
                         $form->fill([
                             'evento_id' => null,
                             'dia' => $dia,
-                            'titulo' => null,
+                            'intimado' => null,
+                            'numero_procedimento' => null,
                             'hora_inicio' => null,
                             'starts_at' => null,
                             'ends_at' => null,
                         ]);
-
                         return;
                     }
 
@@ -440,19 +420,20 @@ class CalendarWidget extends FullCalendarWidget
                         'hora_inicio' => $hora,
                         'starts_at' => $inicio->toDateTimeString(),
                         'ends_at' => $fim->toDateTimeString(),
-                        'titulo' => null,
+                        'intimado' => null,
+                        'numero_procedimento' => null,
                     ]);
                 })
                 ->mutateFormDataUsing(function (array $data): array {
                     if (! $this->agendaUserId) {
                         throw ValidationException::withMessages([
-                            'titulo' => 'Selecione um EPC para agendar.',
+                            'intimado' => 'Selecione um EPC para agendar.',
                         ]);
                     }
 
                     if (empty($data['starts_at'])) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Não há horário disponível para este dia.',
+                            'hora_inicio' => 'Não é possível agendar neste dia.',
                         ]);
                     }
 
@@ -478,6 +459,11 @@ class CalendarWidget extends FullCalendarWidget
                     unset($data['dia'], $data['hora_inicio'], $data['evento_id']);
 
                     return $data;
+                })
+                ->after(function (): void {
+                    // ✅ Observer notifica o EPC
+                    // ✅ aqui a gente só força o refresh pra aparecer sem F5
+                    $this->forceCalendarRefresh();
                 }),
         ];
     }
@@ -486,77 +472,20 @@ class CalendarWidget extends FullCalendarWidget
     {
         return [
             Actions\EditAction::make()
-                ->mountUsing(function (Schema $form, Model $record, array $arguments) {
-                    /** @var Evento $record */
-                    $start = Carbon::parse($record->starts_at);
-                    $dia = $start->toDateString();
-
-                    // ✅ Se bloqueado/fds: abre modal apenas com mensagem (sem editar)
-                    if ($this->isDiaBloqueadoOuFimDeSemana($dia)) {
-                        $form->fill([
-                            'evento_id' => $record->getKey(),
-                            'dia' => $dia,
-                            'titulo' => null,
-                            'hora_inicio' => null,
-                            'starts_at' => null,
-                            'ends_at' => null,
-                        ]);
-
-                        return;
-                    }
-
-                    $hora = $start->format('H:00');
-                    $end = $record->ends_at ? Carbon::parse($record->ends_at) : $start->copy()->addHour();
-
-                    $form->fill([
-                        'evento_id' => $record->getKey(),
-                        'dia' => $dia,
-                        'hora_inicio' => $hora,
-                        'titulo' => $record->titulo,
-                        'starts_at' => $start->toDateTimeString(),
-                        'ends_at' => $end->toDateTimeString(),
-                    ]);
-                })
-                ->mutateFormDataUsing(function (array $data, Model $record): array {
-                    if (empty($data['starts_at'])) {
-                        // bloqueado/fds: não deveria salvar
-                        throw ValidationException::withMessages([
-                            'hora_inicio' => 'Não é possível editar/agendar neste dia.',
-                        ]);
-                    }
-
-                    $start = Carbon::parse($data['starts_at']);
-                    $dia = $start->toDateString();
-
-                    $this->assertDiaAgendavelOrThrow($dia);
-
-                    $jaExiste = Evento::query()
-                        ->where('user_id', $this->agendaUserId)
-                        ->whereKeyNot($record->getKey())
-                        ->whereDate('starts_at', $dia)
-                        ->whereTime('starts_at', $start->format('H:i:s'))
-                        ->exists();
-
-                    if ($jaExiste) {
-                        throw ValidationException::withMessages([
-                            'hora_inicio' => 'Este horário já foi agendado para este usuário. Selecione outro.',
-                        ]);
-                    }
-
-                    unset($data['dia'], $data['hora_inicio'], $data['evento_id']);
-
-                    return $data;
+                ->after(function (): void {
+                    $this->forceCalendarRefresh();
                 }),
 
-            Actions\DeleteAction::make(),
+            Actions\DeleteAction::make()
+                ->after(function (): void {
+                    $this->forceCalendarRefresh();
+                }),
         ];
     }
 
     private function getBlockedDaysInRange(Carbon $start, Carbon $end): Collection
     {
-        if (! $this->agendaUserId) {
-            return collect();
-        }
+        if (! $this->agendaUserId) return collect();
 
         return Bloqueio::query()
             ->where('user_id', $this->agendaUserId)
@@ -567,30 +496,44 @@ class CalendarWidget extends FullCalendarWidget
 
     public function fetchEvents(array $fetchInfo): array
     {
-        if (! $this->agendaUserId) {
-            return [];
-        }
+        if (! $this->agendaUserId) return [];
 
         $rangeStart = Carbon::parse($fetchInfo['start'])->startOfDay();
         $rangeEnd = Carbon::parse($fetchInfo['end'])->endOfDay();
 
-        // eventos normais
-        $agendamentos = Evento::query()
+        $eventos = Evento::query()
             ->where('user_id', $this->agendaUserId)
             ->where('starts_at', '<', $rangeEnd)
             ->where(function ($q) use ($rangeStart) {
                 $q->whereNull('ends_at')->orWhere('ends_at', '>', $rangeStart);
             })
-            ->get()
-            ->map(fn (Evento $e) => [
-                'id' => (string) $e->id,
-                'title' => $e->titulo,
-                'start' => $e->starts_at,
-                'end' => $e->ends_at,
-            ])
+            ->get();
+
+        $diasComAgendamento = $eventos
+            ->map(fn (Evento $e) => Carbon::parse($e->starts_at)->toDateString())
+            ->unique()
+            ->values();
+
+        $agendamentos = $eventos
+            ->map(function (Evento $e) {
+                $intimado = $e->intimado ?: 'Agendamento';
+
+                // exemplo: 14h Mayso
+                $hora = $e->starts_at ? Carbon::parse($e->starts_at)->format('G') : '--';
+                $title = "{$hora}h {$intimado}";
+
+                $proc = $e->numero_procedimento ?: '—';
+
+                return [
+                    'id' => (string) $e->id,
+                    'title' => $title,
+                    'start' => $e->starts_at,
+                    'end' => $e->ends_at,
+                    'procedimento' => "Procedimento: {$proc}",
+                ];
+            })
             ->all();
 
-        // bloqueios em background vermelho + finais de semana em background padrão
         $blockedDays = $this->getBlockedDaysInRange($rangeStart, $rangeEnd)
             ->map(fn ($d) => Carbon::parse($d)->toDateString())
             ->unique()
@@ -602,6 +545,7 @@ class CalendarWidget extends FullCalendarWidget
         while ($cursor->lte($rangeEnd)) {
             $day = $cursor->toDateString();
 
+            // fim de semana (vermelho)
             if ($cursor->isWeekend()) {
                 $background[] = [
                     'id' => 'weekend-' . $day,
@@ -609,11 +553,15 @@ class CalendarWidget extends FullCalendarWidget
                     'end' => $cursor->copy()->addDay()->toDateString(),
                     'allDay' => true,
                     'display' => 'background',
-                     'backgroundColor' => 'rgba(230, 113, 113, 0.96)',
+                    'backgroundColor' => 'rgba(239, 81, 81, 1)',
                     'borderColor' => 'rgba(255, 0, 0, 0.35)',
                 ];
+
+                $cursor->addDay();
+                continue;
             }
 
+            // bloqueio (vermelho)
             if ($blockedDays->contains($day)) {
                 $background[] = [
                     'id' => 'blocked-' . $day,
@@ -621,8 +569,24 @@ class CalendarWidget extends FullCalendarWidget
                     'end' => $cursor->copy()->addDay()->toDateString(),
                     'allDay' => true,
                     'display' => 'background',
-                    'backgroundColor' => 'rgba(230, 113, 113, 0.96)',
+                    'backgroundColor' => 'rgba(239, 81, 81, 1)',
                     'borderColor' => 'rgba(255, 0, 0, 0.35)',
+                ];
+
+                $cursor->addDay();
+                continue;
+            }
+
+            // dia com agendamento (verde)
+            if ($diasComAgendamento->contains($day)) {
+                $background[] = [
+                    'id' => 'busy-' . $day,
+                    'start' => $day,
+                    'end' => $cursor->copy()->addDay()->toDateString(),
+                    'allDay' => true,
+                    'display' => 'background',
+                    'backgroundColor' => 'rgba(0, 128, 0, 1)',
+                    'borderColor' => 'rgba(0, 128, 0, 0.28)',
                 ];
             }
 
