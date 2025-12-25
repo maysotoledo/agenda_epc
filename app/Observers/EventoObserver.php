@@ -11,9 +11,11 @@ class EventoObserver
 {
     private function shouldNotify(Evento $evento): bool
     {
-        if (! $evento->user_id) return false;
+        if (! $evento->user_id) {
+            return false;
+        }
 
-        // opcional: se o EPC alterou sua própria agenda, não notifica ele mesmo
+        // Opcional: se o próprio EPC mexer na própria agenda, não notifica ele mesmo
         if (auth()->id() && auth()->id() === (int) $evento->user_id) {
             return false;
         }
@@ -23,11 +25,15 @@ class EventoObserver
 
     private function notifyEpc(Evento $evento, string $acao): void
     {
-        if (! $this->shouldNotify($evento)) return;
+        if (! $this->shouldNotify($evento)) {
+            return;
+        }
 
         /** @var User|null $epc */
         $epc = User::query()->find($evento->user_id);
-        if (! $epc) return;
+        if (! $epc) {
+            return;
+        }
 
         $quem = auth()->user()?->name ?? 'Sistema';
 
