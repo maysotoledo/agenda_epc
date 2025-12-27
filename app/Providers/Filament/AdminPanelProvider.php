@@ -28,6 +28,7 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('admin')
+            ->viteTheme('resources/css/filament/admin/theme.css')
             ->login()
             ->databaseNotifications()
             ->databaseNotificationsPolling('5s')
@@ -63,7 +64,10 @@ class AdminPanelProvider extends PanelProvider
                 FilamentShieldPlugin::make(),
                 FilamentFullCalendarPlugin::make()
                     ->selectable()
-                    ->editable(),
+                    ->editable()
+                    ->config([
+                            'dayMaxEvents' => true,
+                    ]),
             ])
             ->authMiddleware([
                 Authenticate::class,

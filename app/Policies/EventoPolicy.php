@@ -4,67 +4,72 @@ declare(strict_types=1);
 
 namespace App\Policies;
 
-use Illuminate\Foundation\Auth\User as AuthUser;
 use App\Models\Evento;
+use Illuminate\Foundation\Auth\User as AuthUser;
 use Illuminate\Auth\Access\HandlesAuthorization;
 
 class EventoPolicy
 {
     use HandlesAuthorization;
-    
+
+    private function isAdmin(AuthUser $user): bool
+    {
+        return method_exists($user, 'hasRole') && $user->hasRole('super_admin');
+    }
+
+    private function getCreatorId(Evento $evento): ?int
+    {
+        foreach (['created_by', 'created_by_id', 'created_by_user_id', 'creator_id'] as $key) {
+            $val = $evento->getAttribute($key);
+            if ($val !== null) {
+                return (int) $val;
+            }
+        }
+
+        return null;
+    }
+
+    private function isCreator(AuthUser $user, Evento $evento): bool
+    {
+        $creatorId = $this->getCreatorId($evento);
+
+        return $creatorId !== null && (int) $user->getAuthIdentifier() === $creatorId;
+    }
+
     public function viewAny(AuthUser $authUser): bool
     {
-        return $authUser->can('ViewAny:Evento');
+        return true;
     }
 
     public function view(AuthUser $authUser, Evento $evento): bool
     {
-        return $authUser->can('View:Evento');
+        return true;
     }
 
     public function create(AuthUser $authUser): bool
     {
-        return $authUser->can('Create:Evento');
+        return true;
     }
 
+    // ✅ regra pedida
     public function update(AuthUser $authUser, Evento $evento): bool
     {
-        return $authUser->can('Update:Evento');
+        return $this->isAdmin($authUser) || $this->isCreator($authUser, $evento);
     }
 
+    // ✅ regra pedida
     public function delete(AuthUser $authUser, Evento $evento): bool
     {
-        return $authUser->can('Delete:Evento');
+        return $this->isAdmin($authUser) || $this->isCreator($authUser, $evento);
     }
 
     public function restore(AuthUser $authUser, Evento $evento): bool
     {
-        return $authUser->can('Restore:Evento');
+        return $this->isAdmin($authUser);
     }
 
     public function forceDelete(AuthUser $authUser, Evento $evento): bool
     {
-        return $authUser->can('ForceDelete:Evento');
+        return $this->isAdmin($authUser);
     }
-
-    public function forceDeleteAny(AuthUser $authUser): bool
-    {
-        return $authUser->can('ForceDeleteAny:Evento');
-    }
-
-    public function restoreAny(AuthUser $authUser): bool
-    {
-        return $authUser->can('RestoreAny:Evento');
-    }
-
-    public function replicate(AuthUser $authUser, Evento $evento): bool
-    {
-        return $authUser->can('Replicate:Evento');
-    }
-
-    public function reorder(AuthUser $authUser): bool
-    {
-        return $authUser->can('Reorder:Evento');
-    }
-
 }

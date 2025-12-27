@@ -1,0 +1,9 @@
+@import '../../../../vendor/filament/filament/resources/css/theme.css';
+
+@source '../../../../app/Filament/**/*';
+@source '../../../../resources/views/filament/**/*';
+
+.filament-fullcalendar .fc-more-popover {
+    @apply bg-gray-50 dark:bg-gray-800;
+}
+

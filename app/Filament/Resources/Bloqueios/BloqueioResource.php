@@ -7,6 +7,7 @@ use App\Models\Bloqueio;
 use App\Models\User;
 use BackedEnum;
 use Carbon\Carbon;
+use Filament\Actions\DeleteAction;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -22,15 +23,30 @@ class BloqueioResource extends Resource
 {
     protected static ?string $model = Bloqueio::class;
 
-    // ✅ Tipagem correta (Filament v4)
-    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-no-symbol';
+    public static function getNavigationIcon(): string|BackedEnum|null
+    {
+        return 'heroicon-o-no-symbol';
+    }
 
-    protected static ?string $navigationLabel = 'Bloqueios';
-    protected static ?string $modelLabel = 'Bloqueio';
-    protected static ?string $pluralModelLabel = 'Bloqueios';
+    public static function getNavigationLabel(): string
+    {
+        return 'Bloqueios';
+    }
 
-    // ✅ Tipagem correta (Filament v4)
-    protected static string|UnitEnum|null $navigationGroup = 'Agenda';
+    public static function getModelLabel(): string
+    {
+        return 'Bloqueio';
+    }
+
+    public static function getPluralModelLabel(): string
+    {
+        return 'Bloqueios';
+    }
+
+    public static function getNavigationGroup(): string|UnitEnum|null
+    {
+        return 'Agenda';
+    }
 
     public static function form(Schema $schema): Schema
     {
@@ -53,21 +69,17 @@ class BloqueioResource extends Resource
                 ->native(false)
                 ->helperText('Somente dias úteis. Sábado e domingo já são bloqueados automaticamente.')
                 ->rules([
-                    // ✅ Regra de fim de semana:
-                    // IMPORTANTE: o Filament avalia esta closure, então ela deve RETORNAR a regra.
+                    // Fim de semana
                     fn () => function (string $attribute, $value, \Closure $fail): void {
-                        if (! $value) {
-                            return;
-                        }
+                        if (! $value) return;
 
                         $date = Carbon::parse($value);
-
                         if ($date->isWeekend()) {
                             $fail('Fim de semana já é bloqueado automaticamente. Selecione um dia útil.');
                         }
                     },
 
-                    // ✅ Regra de unicidade: (user_id + dia)
+                    // Unicidade (user_id + dia)
                     fn (Get $get, ?Bloqueio $record) => Rule::unique('bloqueios', 'dia')
                         ->where('user_id', $get('user_id'))
                         ->ignore($record?->getKey()),
@@ -105,6 +117,17 @@ class BloqueioResource extends Resource
                     ->label('Criado em')
                     ->dateTime('d/m/Y H:i')
                     ->toggleable(isToggledHiddenByDefault: true),
+            ])
+            // ✅ Lixeira por linha (Filament v4 usa recordActions + Filament\Actions\DeleteAction)
+            ->recordActions([
+                DeleteAction::make()
+                    ->label('') // só ícone
+                    ->icon('heroicon-o-trash')
+                    ->tooltip('Excluir bloqueio')
+                    ->requiresConfirmation()
+                    ->modalHeading('Excluir bloqueio?')
+                    ->modalDescription('Isso desbloqueia o dia selecionado.')
+                    ->successNotificationTitle('Bloqueio removido'),
             ])
             ->defaultSort('dia', 'desc');
     }
