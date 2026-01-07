@@ -126,6 +126,83 @@ class CalendarWidget extends FullCalendarWidget
         return User::query()->role('epc')->exists();
     }
 
+    /**
+     * ✅ Permite abrir o modal de edição/cancelamento:
+     * admin OU criador OU permissão do Shield (update/delete).
+     */
+    public function canManageEvento(int|string $eventoId): bool
+    {
+        /** @var \App\Models\Evento|null $evento */
+        $evento = Evento::query()->find($eventoId);
+        if (! $evento) return false;
+
+        $user = auth()->user();
+        if (! $user) return false;
+
+        $isAdmin = (bool) $user->hasRole('super_admin');
+        $isCreator = ((int) $evento->created_by === (int) $user->getKey());
+
+        return $isAdmin
+            || $isCreator
+            || Gate::allows('update', $evento)
+            || Gate::allows('delete', $evento);
+    }
+
+    /**
+     * ✅ Polling a cada 10s SOMENTE quando a aba estiver visível.
+     * ✅ Ação: calendar.refetchEvents() (isso puxa novamente o fetchEvents()).
+     */
+    public function viewDidMount(): string
+    {
+        return <<<'JS'
+function(arg) {
+    const calendar = arg?.view?.calendar;
+    const calEl = calendar?.el;
+
+    if (!calendar || !calEl) return;
+
+    // evita instalar 2x
+    if (calEl.dataset.pollVisibleInstalled === '1') return;
+    calEl.dataset.pollVisibleInstalled = '1';
+
+    // key por componente (SPA safe)
+    const root = calEl.closest('[wire\\:id]');
+    const key = root?.getAttribute('wire:id') || 'calendar';
+
+    window.__agendaCalendarTimers = window.__agendaCalendarTimers || {};
+
+    // se já tinha timer antigo (troca de página / hot reload), limpa
+    if (window.__agendaCalendarTimers[key]) {
+        clearInterval(window.__agendaCalendarTimers[key]);
+    }
+
+    const tick = () => {
+        if (document.visibilityState !== 'visible') return;
+
+        try {
+            // ✅ aqui é o "segredo": força o FullCalendar a buscar novamente
+            calendar.refetchEvents();
+        } catch (e) {
+            // opcional: console.debug('refetchEvents failed', e);
+        }
+    };
+
+    // roda já ao montar
+    tick();
+
+    // inicia timer
+    window.__agendaCalendarTimers[key] = setInterval(tick, 10000);
+
+    // ao voltar pra aba, atualiza imediatamente
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') tick();
+    });
+
+    window.addEventListener('focus', tick);
+}
+JS;
+    }
+
     public function config(): array
     {
         return [
@@ -148,13 +225,37 @@ class CalendarWidget extends FullCalendarWidget
                 'hour12' => false,
             ],
 
-            // ✅ Arrastar: abre o edit. Se não puder, o EditAction vira "somente mensagem" e fica só com Fechar.
+            // ✅ Clique no evento: se não tiver permissão, abre o modal já com o aviso.
+            'eventClick' => RawJs::make(<<<'JS'
+function(info) {
+    const lw = info?.view?.calendar?.el?.__livewire;
+    if (!lw) return;
+
+    if (info?.jsEvent?.preventDefault) info.jsEvent.preventDefault();
+
+    const eventId = info.event?.id;
+    if (!eventId) return;
+
+    lw.call('canManageEvento', eventId).then((can) => {
+        if (can) {
+            lw.mountAction('edit', { event: { id: eventId } });
+            return;
+        }
+
+        lw.mountAction('edit', {
+            event: { id: eventId },
+            noPermission: true
+        });
+    });
+}
+JS),
+
+            // ✅ Arrastar: abre o edit. Se não puder, abre o modal já com aviso.
             'eventDrop' => RawJs::make(<<<'JS'
 function(info) {
     const lw = info?.view?.calendar?.el?.__livewire;
     if (!lw) return;
 
-    // Mantém o UI no lugar até salvar / ou até o refresh
     if (typeof info.revert === 'function') info.revert();
 
     const eventId = info.event?.id;
@@ -162,40 +263,27 @@ function(info) {
         info.event?.startStr
         || (info.event?.start ? info.event.start.toISOString() : null);
 
-    lw.mountAction('edit', {
-        event: {
-            id: eventId,
-            start: startStr,
-            end: info.event?.endStr || null,
+    lw.call('canManageEvento', eventId).then((can) => {
+        if (can) {
+            lw.mountAction('edit', {
+                event: {
+                    id: eventId,
+                    start: startStr,
+                    end: info.event?.endStr || null,
+                }
+            });
+            return;
         }
+
+        lw.mountAction('edit', {
+            event: {
+                id: eventId,
+                start: startStr,
+                end: info.event?.endStr || null,
+            },
+            noPermission: true
+        });
     });
-}
-JS),
-
-            // ✅ Tooltip (Filament / Alpine). Mantém também title como fallback.
-            'eventDidMount' => RawJs::make(<<<'JS'
-function({ event, el }) {
-    if (event.display === 'background') return;
-
-    const content =
-        event?.extendedProps?.procedimento
-        ?? event?.title
-        ?? '';
-
-    if (!content) return;
-
-    // Tooltip do Filament (tippy via Alpine)
-    el.setAttribute('x-tooltip', 'tooltip');
-    el.setAttribute('x-data', '{ tooltip: ' + JSON.stringify(content) + ' }');
-
-    // Fallback: tooltip nativo do browser (caso o x-tooltip falhe)
-    el.setAttribute('title', content);
-
-    // IMPORTANTÍSSIMO: como o FullCalendar injeta nós dinamicamente,
-    // forçamos o Alpine a inicializar o tooltip nesse nó
-    if (window.Alpine && typeof window.Alpine.initTree === 'function') {
-        window.Alpine.initTree(el);
-    }
 }
 JS),
         ];
@@ -214,15 +302,10 @@ function({ event, el }) {
 
     if (!content) return;
 
-    // Tooltip do Filament (tippy via Alpine)
     el.setAttribute('x-tooltip', 'tooltip');
     el.setAttribute('x-data', '{ tooltip: ' + JSON.stringify(content) + ' }');
-
-    // Fallback: tooltip nativo do browser (caso o x-tooltip falhe)
     el.setAttribute('title', content);
 
-    // IMPORTANTÍSSIMO: como o FullCalendar injeta nós dinamicamente,
-    // forçamos o Alpine a inicializar o tooltip nesse nó
     if (window.Alpine && typeof window.Alpine.initTree === 'function') {
         window.Alpine.initTree(el);
     }
@@ -350,11 +433,9 @@ JS;
             Hidden::make('evento_id'),
             Hidden::make('dia')->dehydrated(false),
 
-            // ✅ flags para "somente mensagem"
             Hidden::make('somente_msg')->dehydrated(false),
             Hidden::make('somente_msg_texto')->dehydrated(false),
 
-            // Mantém compatibilidade com sua lógica antiga
             Hidden::make('sem_horario')->dehydrated(false),
             Hidden::make('sem_horario_msg')->dehydrated(false),
 
@@ -414,7 +495,6 @@ JS;
 
             Actions\CreateAction::make()
                 ->label('Agendar')
-
                 ->createAnother(false)
                 ->modalSubmitAction(fn (\Filament\Actions\Action $action) => $action->visible(fn (): bool => ! $this->modalSemHorario))
                 ->modalCancelAction(function (\Filament\Actions\Action $action) {
@@ -571,7 +651,7 @@ JS;
                 ->mutateFormDataUsing(function (array $data): array {
                     if ($this->modalSemHorario || ($data['somente_msg'] ?? false)) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Não é possível concluir esta ação.',
+                            'hora_inicio' => '❌ Não é possível concluir esta ação.',
                         ]);
                     }
 
@@ -583,7 +663,7 @@ JS;
 
                     if (empty($data['starts_at'])) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Não é possível agendar neste dia.',
+                            'hora_inicio' => '❌ Não é possível agendar neste dia.',
                         ]);
                     }
 
@@ -600,14 +680,11 @@ JS;
 
                     if ($jaExiste) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Este horário já foi agendado para este usuário. Selecione outro.',
+                            'hora_inicio' => '❌ Este horário já foi agendado para este usuário. Selecione outro.',
                         ]);
                     }
 
                     $data['user_id'] = $this->agendaUserId;
-
-                    // ✅ IMPORTANTE: grava quem criou
-                    // (precisa existir a coluna created_by na tabela eventos)
                     $data['created_by'] = auth()->id();
 
                     unset(
@@ -645,8 +722,13 @@ JS;
                     /** @var \App\Models\Evento $record */
                     $this->modalSemHorario = false;
 
-                    // ✅ Regra: só admin ou criador pode editar
-                    if (! Gate::allows('update', $record)) {
+                    $user = auth()->user();
+                    $isAdmin = (bool) ($user?->hasRole('admin'));
+                    $isCreator = $user && ((int) $record->created_by === (int) $user->getKey());
+
+                    $canEdit = $isAdmin || $isCreator || Gate::allows('update', $record);
+
+                    if (($arguments['noPermission'] ?? false) === true) {
                         $this->modalSemHorario = true;
 
                         $dia = $record->starts_at ? Carbon::parse($record->starts_at)->toDateString() : null;
@@ -656,7 +738,34 @@ JS;
                             'dia' => $dia,
 
                             'somente_msg' => true,
-                            'somente_msg_texto' => '⚠️ Você não tem permissão para editar este agendamento.',
+                            'somente_msg_texto' => '❌ Você não tem permissão para editar/cancelar este agendamento.',
+
+                            'sem_horario' => false,
+                            'sem_horario_msg' => null,
+
+                            'hora_inicio' => null,
+                            'starts_at' => null,
+                            'ends_at' => null,
+
+                            'intimado' => $record->intimado,
+                            'numero_procedimento' => $record->numero_procedimento,
+                        ]);
+
+                        $this->forceCalendarRefresh();
+                        return;
+                    }
+
+                    if (! $canEdit) {
+                        $this->modalSemHorario = true;
+
+                        $dia = $record->starts_at ? Carbon::parse($record->starts_at)->toDateString() : null;
+
+                        $form->fill([
+                            'evento_id' => $record->id,
+                            'dia' => $dia,
+
+                            'somente_msg' => true,
+                            'somente_msg_texto' => '❌ Você não tem permissão para editar este agendamento.',
 
                             'sem_horario' => false,
                             'sem_horario_msg' => null,
@@ -783,7 +892,7 @@ JS;
                 ->mutateFormDataUsing(function (array $data): array {
                     if ($this->modalSemHorario || ($data['somente_msg'] ?? false)) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Não é possível concluir esta ação.',
+                            'hora_inicio' => '❌ Não é possível concluir esta ação.',
                         ]);
                     }
 
@@ -795,7 +904,7 @@ JS;
 
                     if (empty($data['starts_at'])) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Não há horários disponíveis para este dia.',
+                            'hora_inicio' => '❌ Não há horários disponíveis para este dia.',
                         ]);
                     }
 
@@ -815,7 +924,7 @@ JS;
 
                     if ($jaExiste) {
                         throw ValidationException::withMessages([
-                            'hora_inicio' => 'Este horário já foi agendado para este usuário. Selecione outro.',
+                            'hora_inicio' => '❌ Este horário já foi agendado para este usuário. Selecione outro.',
                         ]);
                     }
 
@@ -835,7 +944,12 @@ JS;
                 })
                 ->using(function (Model $record, array $data) {
                     /** @var \App\Models\Evento $record */
-                    Gate::authorize('update', $record);
+                    $user = auth()->user();
+                    $isAdmin = (bool) ($user?->hasRole('admin'));
+                    $isCreator = $user && ((int) $record->created_by === (int) $user->getKey());
+
+                    abort_unless($isAdmin || $isCreator || Gate::allows('update', $record), 403);
+
                     return app(EventoService::class)->editar($record, $data);
                 })
                 ->after(function (): void {
@@ -844,12 +958,24 @@ JS;
 
             Actions\DeleteAction::make()
                 ->label('Cancelar')
-                ->visible(fn (Model $record): bool => Gate::allows('delete', $record))
+                ->visible(function (Model $record): bool {
+                    /** @var \App\Models\Evento $record */
+                    $user = auth()->user();
+                    $isAdmin = (bool) ($user?->hasRole('admin'));
+                    $isCreator = $user && ((int) $record->created_by === (int) $user->getKey());
+
+                    return $isAdmin || $isCreator || Gate::allows('delete', $record);
+                })
                 ->modalHeading('Cancelar agendamento?')
                 ->modalDescription('O cancelamento preserva o histórico e pode ser restaurado depois.')
                 ->action(function (Model $record): void {
                     /** @var \App\Models\Evento $record */
-                    Gate::authorize('delete', $record);
+                    $user = auth()->user();
+                    $isAdmin = (bool) ($user?->hasRole('admin'));
+                    $isCreator = $user && ((int) $record->created_by === (int) $user->getKey());
+
+                    abort_unless($isAdmin || $isCreator || Gate::allows('delete', $record), 403);
+
                     app(EventoService::class)->cancelar($record);
                 })
                 ->after(function (): void {
@@ -896,7 +1022,6 @@ JS;
 
                 $hora = $e->starts_at ? Carbon::parse($e->starts_at)->format('G') : '--';
 
-                // ✅ Ex.: "14h Mayso 2025.123"
                 $title = "{$hora}h {$intimado}" . ($proc ? " {$proc}" : '');
 
                 return [

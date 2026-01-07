@@ -48,7 +48,7 @@ class EventoResource extends Resource
 
     public static function getPluralModelLabel(): string
     {
-        return 'Eventos Agendas';
+        return 'Eventos da Agenda';
     }
 
     public static function getNavigationSort(): ?int
@@ -73,13 +73,21 @@ class EventoResource extends Resource
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
 
+                    TextColumn::make('criadoPor.name')
+                    ->label('Criado por'),
+
                 TextColumn::make('user.name')
                     ->label('EPC')
                     ->searchable()
                     ->sortable(),
 
+                TextColumn::make('intimado')
+                        ->label('Intimado')
+                        ->searchable()
+                        ->wrap(),
+
                 TextColumn::make('starts_at')
-                    ->label('Data')
+                    ->label('Comparecimento')
                     ->dateTime('d/m/Y H:i')
                     ->sortable(),
 
@@ -87,11 +95,6 @@ class EventoResource extends Resource
                     ->label('Fim')
                     ->dateTime('d/m/Y H:i')
                     ->toggleable(isToggledHiddenByDefault: true),
-
-                TextColumn::make('intimado')
-                    ->label('Intimado')
-                    ->searchable()
-                    ->wrap(),
 
                 TextColumn::make('numero_procedimento')
                     ->label('Procedimento')
@@ -105,16 +108,12 @@ class EventoResource extends Resource
                     ->toggleable(),
 
                 TextColumn::make('canceladoPor.name')
-                    ->label('Cancelado por')
-                    ->toggleable(isToggledHiddenByDefault: true),
-
-                TextColumn::make('criadoPor.name')
-                    ->label('Criado por')
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->label('Cancelado por'),
+                    //->toggleable(isToggledHiddenByDefault: true),
 
                 TextColumn::make('atualizadoPor.name')
-                    ->label('Atualizado por')
-                    ->toggleable(isToggledHiddenByDefault: true),
+                    ->label('Atualizado por'),
+                    //->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
                 SelectFilter::make('user_id')
@@ -176,18 +175,18 @@ class EventoResource extends Resource
                     ->modalDescription('O cancelamento preserva o histórico e pode ser restaurado.')
                     ->action(function (Collection $records): void {
                         $userId = Auth::id();
-                    
+
                         foreach ($records as $record) {
                             /** @var \App\Models\Evento $record */
                             if ($record->trashed()) {
                                 continue;
                             }
-                        
+
                             $record->forceFill([
                                 'updated_by' => $userId,
                                 'deleted_by' => $userId,
                             ])->save();
-                            
+
                             $record->delete(); // soft delete
                         }
                     }),
